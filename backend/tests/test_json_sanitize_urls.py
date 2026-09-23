@@ -147,6 +147,28 @@ class SanitizePreservesStringContentTests(unittest.TestCase):
 
         self.assertEqual(json.loads(cleaned)["url"], "https://example.com/a//b")
 
+    def test_url_in_unterminated_string_is_preserved(self) -> None:
+        """被 max_tokens 截断时，字符串可能没有闭合引号。
+
+        这恰恰是本文件所在仓库专门用 ``_repair_truncated_json`` 处理的情形，
+        而规划 Prompt 又要求把预约链接原样透传，所以「未闭合字符串里带 URL」
+        是现实输入。
+
+        这类输入是逐字符扫描相对于「先匹配完整字符串」的正则的关键优势：
+        ``re.sub(r'("(?:\\.|[^"\\\\])*")|//[^\n]*', ...)`` 在字符串未闭合时匹配
+        不到字符串分支，于是 ``//`` 仍会把 URL 截断；扫描器则因为始终保持在
+        in_string 状态而完整保留它。实测对比（同一输入）：
+
+            old      URL preserved = False
+            oneliner URL preserved = False
+            scanner  URL preserved = True
+        """
+        source = '{"reservation_tips": "请提前 7 天在官网预约：' + BOOKING_URL
+
+        cleaned = self.planner._sanitize_json_str(source)
+
+        self.assertIn(BOOKING_URL, cleaned)
+
 
 class SanitizeStillRemovesRealCommentsTests(unittest.TestCase):
     """不该因修复 URL 而丢掉原本的注释清理能力。"""
