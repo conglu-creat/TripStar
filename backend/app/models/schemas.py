@@ -34,6 +34,11 @@ class TripRequest(BaseModel):
             self.cities = [CityStay(city=self.city, days=self.travel_days)]
         if self.cities and not self.city:
             self.city = self.cities[0].city
+        # 下游流程依赖 cities 非空（trip_planner_agent 会直接取 cities[0]），
+        # 这里必须拦住，否则请求先返回 200、再在后台任务里以
+        # 「IndexError: list index out of range」失败，用户拿到的是无法定位的报错。
+        if not self.cities:
+            raise ValueError("必须提供 city 或 cities 中的至少一个目的地城市")
         return self
 
     class Config:
