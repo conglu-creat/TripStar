@@ -29,6 +29,7 @@ import types
 import unittest
 from pathlib import Path
 from unittest import mock
+from typing import Optional
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
@@ -74,23 +75,65 @@ class _FakeCompletions:
         self._owner = owner
 
     def create(self, **kwargs):
+        # 机制无关地记录「本次请求实际生效的超时」：实现既可以用
+        # with_options(timeout=...)（本 PR 的写法），也可以直接给 create()
+        # 传 timeout=（openai SDK 同样支持），两者在这里都算通过。
+        effective_timeout = kwargs.pop("timeout", self._owner.effective_timeout)
         self._owner.requests.append(kwargs)
+        self._owner.effective_timeouts.append(effective_timeout)
+
+        if self._owner.fail_first_call and len(self._owner.requests) == 1:
+            raise TimeoutError("simulated timeout")
+
         if kwargs.get("stream"):
             return [_Chunk("好"), _Chunk("的")]
         return _Response("好的")
 
 
 class _FakeClient:
-    """记录 with_options 与 create 的调用，用于断言超时是否真的传下去了。"""
+    """最小可用的假 OpenAI client。
 
-    def __init__(self) -> None:
-        self.with_options_calls = []
-        self.requests = []
+    与真实 SDK 行为一致：``with_options()`` 返回**新对象**且不修改原对象
+    （这正是不能直接改写 self._client.timeout 的原因）。派生对象与原对象
+    共享同一份请求日志，便于断言请求实际生效的超时值。
+    """
+
+    def __init__(
+        self,
+        log: Optional[dict] = None,
+        base_timeout: int = 60,
+        override_timeout: Optional[int] = None,
+        fail_first_call: bool = False,
+    ) -> None:
+        self._log = log if log is not None else {"requests": [], "timeouts": []}
+        self.base_timeout = base_timeout
+        self.override_timeout = override_timeout
+        self.fail_first_call = fail_first_call
         self.chat = types.SimpleNamespace(completions=_FakeCompletions(self))
 
+    @property
+    def requests(self) -> list:
+        return self._log["requests"]
+
+    @property
+    def effective_timeouts(self) -> list:
+        return self._log["timeouts"]
+
+    @property
+    def effective_timeout(self) -> int:
+        return (
+            self.override_timeout
+            if self.override_timeout is not None
+            else self.base_timeout
+        )
+
     def with_options(self, **kwargs):
-        self.with_options_calls.append(kwargs)
-        return self
+        return _FakeClient(
+            self._log,
+            self.base_timeout,
+            kwargs.get("timeout", self.override_timeout),
+            self.fail_first_call,
+        )
 
 
 def _make_llm(fake_client: _FakeClient) -> DirectOpenAILLM:
@@ -124,26 +167,17 @@ def _trip_request() -> TripRequest:
 class PerRequestTimeoutTests(unittest.TestCase):
     """适配器层：kwargs 里的 timeout 必须作用到本次请求。"""
 
-    def test_explicit_timeout_is_forwarded_to_the_client(self) -> None:
+    def test_explicit_timeout_governs_the_request(self) -> None:
         fake = _FakeClient()
         agent = SimpleAgent(name="探针", llm=_make_llm(fake), system_prompt="探针提示词")
 
         agent.run("查询天气", timeout=180, temperature=0.2)
 
-        self.assertIn(
-            {"timeout": 180},
-            fake.with_options_calls,
-            "timeout 被静默丢弃了，没有作用到本次请求上",
+        self.assertEqual(
+            fake.effective_timeouts,
+            [180],
+            "timeout 被静默丢弃了，本次请求仍在使用客户端级默认值",
         )
-
-    def test_timeout_is_not_sent_as_a_request_body_field(self) -> None:
-        fake = _FakeClient()
-        agent = SimpleAgent(name="探针", llm=_make_llm(fake), system_prompt="探针提示词")
-
-        agent.run("查询天气", timeout=180)
-
-        self.assertEqual(len(fake.requests), 1)
-        self.assertNotIn("timeout", fake.requests[0])
 
     def test_omitting_timeout_keeps_the_client_level_default(self) -> None:
         fake = _FakeClient()
@@ -151,8 +185,7 @@ class PerRequestTimeoutTests(unittest.TestCase):
 
         agent.run("查询天气")
 
-        self.assertEqual(fake.with_options_calls, [])
-        self.assertEqual(len(fake.requests), 1)
+        self.assertEqual(fake.effective_timeouts, [fake.base_timeout])
 
     def test_non_streaming_path_also_honours_timeout(self) -> None:
         fake = _FakeClient()
@@ -161,7 +194,7 @@ class PerRequestTimeoutTests(unittest.TestCase):
         content = llm.invoke([{"role": "user", "content": "hi"}], stream=False, timeout=42)
 
         self.assertEqual(content, "好的")
-        self.assertIn({"timeout": 42}, fake.with_options_calls)
+        self.assertEqual(fake.effective_timeouts, [42])
 
 
 class TripPlannerTimeoutTests(unittest.TestCase):
@@ -187,9 +220,9 @@ class TripPlannerTimeoutTests(unittest.TestCase):
                 )
             )
 
-        self.assertIn(
-            {"timeout": 240},
-            fake.with_options_calls,
+        self.assertEqual(
+            fake.effective_timeouts,
+            [240],
             "TRIP_PLANNER_TIMEOUT 没有生效——规划阶段仍在使用 LLM_TIMEOUT",
         )
 
@@ -205,7 +238,25 @@ class TripPlannerTimeoutTests(unittest.TestCase):
                 )
             )
 
-        self.assertIn({"timeout": 180}, fake.with_options_calls)
+        self.assertEqual(fake.effective_timeouts, [180])
+
+    def test_retry_after_timeout_keeps_the_longer_deadline(self) -> None:
+        """超时重试分支（trip_planner_agent 里第二处 run 调用）也必须带上该超时。
+
+        原先没有任何用例覆盖这条分支，因此只在这里丢掉 timeout 不会被发现。
+        """
+        fake = _FakeClient(fail_first_call=True)
+        planner = self._planner_with(fake)
+
+        with mock.patch.dict(os.environ, {"TRIP_PLANNER_TIMEOUT": "240"}):
+            asyncio.run(
+                planner._run_planner_with_retry(
+                    _trip_request(), {"北京": "景点"}, {"北京": "晴"}, {"北京": "酒店"}
+                )
+            )
+
+        self.assertEqual(len(fake.effective_timeouts), 2, "应发生一次超时重试")
+        self.assertEqual(fake.effective_timeouts, [240, 240])
 
 
 if __name__ == "__main__":

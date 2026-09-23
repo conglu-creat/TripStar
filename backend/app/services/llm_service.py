@@ -54,7 +54,7 @@ class DirectOpenAILLM:
         request_timeout = kwargs.pop("timeout", None)
         client = (
             self._client.with_options(timeout=request_timeout)
-            if request_timeout
+            if request_timeout is not None
             else self._client
         )
         request_kwargs = {
