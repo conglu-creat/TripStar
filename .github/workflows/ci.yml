@@ -27,7 +27,8 @@ jobs:
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # 与 Dockerfile 的 node:18-slim 保持一致，避免「CI 通过但镜像构建失败」
+          node-version: '18'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -63,11 +64,12 @@ jobs:
         run: python -c "import app.api.main"
 
       # 当前仓库还没有 backend/tests；此步骤在测试目录出现后自动生效，
-      # 无需再改本文件。
+      # 无需再改本文件。缺失时用 ::warning:: 让它保持可见，避免出现
+      # 「绿色但一个测试都没跑」的假象。
       - name: 单元测试
         run: |
           if [ -d backend/tests ]; then
             python -m unittest discover -s backend/tests -v
           else
-            echo "backend/tests 不存在，跳过单元测试"
+            echo "::warning::backend/tests 不存在，本次未执行任何后端单元测试"
           fi
