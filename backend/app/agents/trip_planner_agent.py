@@ -236,6 +236,10 @@ class MultiAgentTripPlanner:
 
         ``SimpleAgent.__init__`` 只做字段赋值，构造成本可忽略；真正昂贵的
         地图工具仍在 ``__init__`` 中初始化一次，通过 ``self._active_tool`` 复用。
+
+        ``__init__`` 中也会调用本方法构建一组实例，但它们不参与任何规划流程，
+        仅为状态接口 ``/api/trip/health``（``routes/trip.py:540-541`` 读取
+        ``planner_agent.name`` 与 ``weather_agent.list_tools()``）而保留。
         """
         weather_agent = SimpleAgent(
             name="天气查询专家",

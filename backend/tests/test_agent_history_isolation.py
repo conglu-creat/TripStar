@@ -225,35 +225,48 @@ class TripPlanningAgentIsolationTests(unittest.TestCase):
         with _StubXhsModule():
             llm.planner_response = _plan_payload("北京")
             asyncio.run(planner.plan_trip(_trip_request("北京")))
+            boundary = len(llm.all_calls)
 
             llm.planner_response = _plan_payload("上海")
             asyncio.run(planner.plan_trip(_trip_request("上海")))
 
         self.assertEqual(len(llm.planner_calls), 2, "两次请求应各产生一次规划调用")
 
-        second_plan_text = json.dumps(llm.planner_calls[-1], ensure_ascii=False)
+        # 断言覆盖第二次请求的**全部**模型调用（天气 / 酒店 / 规划三个 Agent），
+        # 而不只是规划调用。否则「只把规划 Agent 换成新实例、天气与酒店仍共享」
+        # 这种部分修复会带着泄漏溜过去。
+        second_request_calls = json.dumps(llm.all_calls[boundary:], ensure_ascii=False)
         self.assertNotIn(
             "北京",
-            second_plan_text,
-            "第二次规划仍能看到第一次请求的城市，说明 Agent 对话历史跨请求泄漏了",
+            second_request_calls,
+            "第二次请求的模型调用中仍能看到第一次请求的城市，说明对话历史跨请求泄漏了",
         )
 
-    def test_repeated_plans_do_not_grow_planner_prompt(self) -> None:
+    def test_later_plans_never_see_earlier_cities(self) -> None:
+        """连续多次规划时，每次请求都不得看到此前任何一次请求的城市。
+
+        原实现比较各次规划请求的字节长度是否相等，是个脆弱的代理指标——它之所
+        以长期为真，只是因为所选城市名恰好都是 2 个字（实测把城市换成
+        「呼和浩特」「新疆维吾尔自治区」时长度即不相等）。改为直接断言城市名
+        不出现，既不依赖输入长度，也能覆盖三个 Agent。
+        """
         llm = _RecordingLLM()
         planner = _build_planner(llm)
 
-        sizes = []
+        cities = ("北京", "上海", "广州")
         with _StubXhsModule():
-            for city in ("北京", "上海", "广州"):
+            for index, city in enumerate(cities):
                 llm.planner_response = _plan_payload(city)
+                boundary = len(llm.all_calls)
                 asyncio.run(planner.plan_trip(_trip_request(city)))
-                sizes.append(len(json.dumps(llm.planner_calls[-1], ensure_ascii=False)))
 
-        self.assertEqual(
-            len(set(sizes)),
-            1,
-            f"规划请求体积应保持恒定，实际为 {sizes}（增长说明历史在累积）",
-        )
+                current_calls = json.dumps(llm.all_calls[boundary:], ensure_ascii=False)
+                for earlier in cities[:index]:
+                    self.assertNotIn(
+                        earlier,
+                        current_calls,
+                        f"第 {index + 1} 次请求（{city}）的模型调用中出现了此前的城市 {earlier}",
+                    )
 
     def test_singleton_agent_attributes_are_untouched_by_planning(self) -> None:
         """规划流程不应把对话历史写回单例上的 Agent 属性。"""
