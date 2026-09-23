@@ -38,6 +38,7 @@ import sys
 import time
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -53,6 +54,7 @@ if hasattr(sys.stderr, "reconfigure"):
 from app.api.routes import map as map_routes
 from app.api.routes import poi as poi_routes
 from app.models.schemas import RouteRequest
+from app.services import amap_service
 
 # 假阻塞的时长，以及 ticker 的间隔
 BLOCK_SECONDS = 0.25
@@ -207,6 +209,42 @@ class ServiceCreationDoesNotBlockTheLoopTests(_LoopStarvationAssertions):
             poi_routes.search_poi(keywords="故宫", city="北京"),
             "GET /api/poi/search 的服务实例构造",
         )
+
+
+class ServiceSingletonIsThreadSafeTests(unittest.TestCase):
+    """把取实例挪进线程后，单例本身必须线程安全。
+
+    改动前 get_amap_service() 在事件循环线程上被调用，事件循环天然把
+    「检查 - 构造 - 赋值」串行化了。改成 asyncio.to_thread 之后，并发首次请求
+    会同时进入该函数：若不加锁，多个线程都会看到 _amap_service is None 而各建
+    一个 AmapService——而每次构造都包含一次 MCP 服务发现往返，多出来的实例
+    随即被覆盖丢弃。
+    """
+
+    def test_concurrent_first_calls_create_exactly_one_instance(self) -> None:
+        created = []
+
+        class _SlowService:
+            def __init__(self) -> None:
+                # 放大构造窗口，使竞争在未加锁时能稳定复现
+                time.sleep(0.05)
+                created.append(self)
+
+        workers = 8
+        with mock.patch.object(amap_service, "AmapService", _SlowService), mock.patch.object(
+            amap_service, "_amap_service", None
+        ):
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(
+                    pool.map(lambda _: amap_service.get_amap_service(), range(workers))
+                )
+
+        self.assertEqual(
+            len(created),
+            1,
+            f"并发首次调用构造了 {len(created)} 个实例（应为 1）——单例存在竞态",
+        )
+        self.assertEqual(len({id(r) for r in results}), 1, "并发调用返回了不同实例")
 
 
 if __name__ == "__main__":
