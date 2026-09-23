@@ -1,5 +1,7 @@
 """地图服务API路由"""
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from ...models.schemas import (
@@ -39,10 +41,14 @@ async def search_poi(
     """
     try:
         # 获取服务实例
-        service = get_amap_service()
+        # 首次调用会构造 MCPTool（内部 spawn 子进程并做服务发现，见
+        # protocol_tools.py:124、:271），同样是阻塞操作，必须放到线程里。
+        service = await asyncio.to_thread(get_amap_service)
         
         # 搜索POI
-        pois = service.search_poi(keywords, city, citylimit)
+        # AmapService 是同步实现（内部走 MCPTool.run，会 spawn 子进程并阻塞
+        # 调用线程），必须放到线程里执行，否则会冻结整个事件循环。
+        pois = await asyncio.to_thread(service.search_poi, keywords, city, citylimit)
         
         return POISearchResponse(
             success=bool(pois),
@@ -78,10 +84,12 @@ async def get_weather(
     """
     try:
         # 获取服务实例
-        service = get_amap_service()
+        # 首次调用会构造 MCPTool（内部 spawn 子进程并做服务发现，见
+        # protocol_tools.py:124、:271），同样是阻塞操作，必须放到线程里。
+        service = await asyncio.to_thread(get_amap_service)
         
         # 查询天气
-        weather_info = service.get_weather(city)
+        weather_info = await asyncio.to_thread(service.get_weather, city)
         
         return WeatherResponse(
             success=bool(weather_info),
@@ -115,10 +123,13 @@ async def plan_route(request: RouteRequest):
     """
     try:
         # 获取服务实例
-        service = get_amap_service()
+        # 首次调用会构造 MCPTool（内部 spawn 子进程并做服务发现，见
+        # protocol_tools.py:124、:271），同样是阻塞操作，必须放到线程里。
+        service = await asyncio.to_thread(get_amap_service)
         
         # 规划路线
-        route_info = service.plan_route(
+        route_info = await asyncio.to_thread(
+            service.plan_route,
             origin_address=request.origin_address,
             destination_address=request.destination_address,
             origin_city=request.origin_city,
@@ -161,7 +172,9 @@ async def health_check():
     """健康检查"""
     try:
         # 检查服务是否可用
-        service = get_amap_service()
+        # 首次调用会构造 MCPTool（内部 spawn 子进程并做服务发现，见
+        # protocol_tools.py:124、:271），同样是阻塞操作，必须放到线程里。
+        service = await asyncio.to_thread(get_amap_service)
         
         return {
             "status": "healthy",

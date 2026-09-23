@@ -1,5 +1,7 @@
 """POI相关API路由"""
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -32,10 +34,14 @@ async def get_poi_detail(poi_id: str):
         POI详情响应
     """
     try:
-        amap_service = get_amap_service()
+        # 首次调用会构造 MCPTool（内部 spawn 子进程并做服务发现，见
+        # protocol_tools.py:124、:271），同样是阻塞操作，必须放到线程里。
+        amap_service = await asyncio.to_thread(get_amap_service)
         
         # 调用高德地图POI详情API
-        result = amap_service.get_poi_detail(poi_id)
+        # AmapService 是同步实现（内部走 MCPTool.run，会 spawn 子进程并阻塞
+        # 调用线程），必须放到线程里执行，否则会冻结整个事件循环。
+        result = await asyncio.to_thread(amap_service.get_poi_detail, poi_id)
         
         return POIDetailResponse(
             success=True,
@@ -68,8 +74,10 @@ async def search_poi(keywords: str, city: str = "北京"):
         搜索结果
     """
     try:
-        amap_service = get_amap_service()
-        result = amap_service.search_poi(keywords, city)
+        # 首次调用会构造 MCPTool（内部 spawn 子进程并做服务发现，见
+        # protocol_tools.py:124、:271），同样是阻塞操作，必须放到线程里。
+        amap_service = await asyncio.to_thread(get_amap_service)
+        result = await asyncio.to_thread(amap_service.search_poi, keywords, city)
 
         return {
             "success": True,
