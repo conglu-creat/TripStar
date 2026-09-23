@@ -73,7 +73,23 @@ class Settings(BaseSettings):
 
 # 创建全局配置实例
 settings = Settings()
-_RUNTIME_SETTINGS_FILE = Path(__file__).resolve().parent.parent / "runtime_settings.json"
+
+
+def _resolve_runtime_settings_file() -> Path:
+    """解析运行时配置文件的落盘位置。
+
+    默认仍是 backend/runtime_settings.json，本地开发行为不变。容器部署下可用
+    RUNTIME_SETTINGS_PATH 指向已挂载的数据卷——否则 `docker compose down &&
+    up -d --build` 重建容器时，用户在设置页填写的全部 Key 都会被静默清空，
+    而 README 正是把设置页作为容器部署的配置方式来推荐的。
+    """
+    override = (os.getenv("RUNTIME_SETTINGS_PATH") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parent.parent / "runtime_settings.json"
+
+
+_RUNTIME_SETTINGS_FILE = _resolve_runtime_settings_file()
 _RUNTIME_SETTING_KEYS = {
     "vite_amap_web_key",
     "vite_amap_web_js_key",

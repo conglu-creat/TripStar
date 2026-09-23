@@ -1,14 +1,23 @@
 """SQLite 持久化存储实现（可选，需安装 aiosqlite）"""
+import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from .base import BaseMemoryStore
 from .data_model import MemoryItem
 
+DEFAULT_DB_PATH = "./memory.db"
+
 
 class SqliteMemoryStore(BaseMemoryStore):
-    def __init__(self, db_path: str = "./memory.db") -> None:
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        # 优先级：显式传入 > MEMORY_DB_PATH > 历史默认值。
+        # 容器部署时 start.sh 会 `cd /app`，因此默认值会落到 /app/memory.db，
+        # 而 compose 只挂载了 /app/backend/data——容器重建即丢失全部偏好记忆。
+        # 由 MEMORY_DB_PATH 指向已挂载的数据卷即可持久化。
+        self.db_path = (
+            db_path or (os.getenv("MEMORY_DB_PATH") or "").strip() or DEFAULT_DB_PATH
+        )
 
     async def init_table(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)

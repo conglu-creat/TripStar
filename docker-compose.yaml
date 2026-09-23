@@ -28,6 +28,12 @@ services:
       - HOST=0.0.0.0
       - PORT=7860
       - LOG_LEVEL=INFO
+      # 把运行时配置与偏好记忆落到已挂载的 trip_data 卷内。
+      # 否则它们分别位于 /app/backend/runtime_settings.json 与 /app/memory.db
+      # （start.sh 会 cd /app），都在卷之外——`docker compose down && up` 重建
+      # 容器时会静默清空，用户在设置页填的所有 Key 都会丢失。
+      - RUNTIME_SETTINGS_PATH=/app/backend/data/runtime_settings.json
+      - MEMORY_DB_PATH=/app/backend/data/memory.db
     volumes:
       - trip_data:/app/backend/data
     restart: unless-stopped
