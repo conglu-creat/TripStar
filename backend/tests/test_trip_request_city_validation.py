@@ -22,6 +22,8 @@
 import sys
 import unittest
 from pathlib import Path
+import tempfile
+from unittest import mock
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
@@ -87,7 +89,31 @@ class TripRequestCityValidationTests(unittest.TestCase):
 
 
 class PlanEndpointValidationTests(unittest.TestCase):
-    """接口层：非法请求应在入口得到 422，而不是 200 之后异步失败。"""
+    """接口层：非法请求应在入口得到 422，而不是 200 之后异步失败。
+
+    这两个用例会把请求真的发给应用，因此必须先把副作用隔离掉：
+    一旦校验失效（即回归状态），``POST /api/trip/plan`` 会成功创建任务、
+    启动后台规划并调用 ``_persist_task_state()`` 往
+    ``backend/data/trip_tasks/`` 写 JSON——该目录被 .gitignore 忽略，
+    ``git status`` 看不到，而 ``_load_persisted_tasks()`` 又会在下次导入时
+    把它们读回来（打印「已加载 N 个持久化旅行任务」）。既污染仓库，
+    又让测试变慢（实测 1.0s → 17.4s）。因此这里把任务目录指向临时目录，
+    并把后台规划替换为 no-op，使测试在任何修复状态下都不产生外部副作用。
+    """
+
+    def setUp(self) -> None:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+
+        async def _noop_run_trip_planning(task_id, request):  # pragma: no cover - 仅隔离用
+            return None
+
+        for patcher in (
+            mock.patch("app.api.routes.trip._TASKS_DATA_DIR", Path(tmpdir.name)),
+            mock.patch("app.api.routes.trip._run_trip_planning", new=_noop_run_trip_planning),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _client(self):
         from fastapi.testclient import TestClient
@@ -105,10 +131,30 @@ class PlanEndpointValidationTests(unittest.TestCase):
             f"缺少目的地城市应被校验拦截，实际返回 {response.status_code}: {response.text[:200]}",
         )
 
-    def test_validation_error_names_the_city_field(self) -> None:
+    def test_validation_error_message_is_actionable(self) -> None:
+        """422 的 detail 里必须给出可读原因。
+
+        注意：该校验位于 model_validator(mode="after")，所以 FastAPI 返回的
+        ``loc`` 是 ``["body"]`` 而不是 ``["body","city"]``——断言字段名只会
+        因为中文提示里恰好含 "city" 而通过，属于假阳性。这里改为断言提示文本。
+        """
         response = self._client().post("/api/trip/plan", json=_payload())
 
-        self.assertIn("city", response.text.lower())
+        self.assertEqual(response.status_code, 422)
+        messages = " ".join(
+            str(item.get("msg", "")) for item in response.json().get("detail", [])
+        )
+        self.assertIn("目的地城市", messages, f"422 未给出可读原因: {response.text[:200]}")
+
+    def test_plan_with_blank_city_returns_422(self) -> None:
+        """只有空白的城市名同样是无效输入，不能走到下游才炸。"""
+        response = self._client().post("/api/trip/plan", json=_payload(city="   "))
+
+        self.assertEqual(
+            response.status_code,
+            422,
+            f"空白城市名应被校验拦截，实际返回 {response.status_code}: {response.text[:200]}",
+        )
 
 
 if __name__ == "__main__":

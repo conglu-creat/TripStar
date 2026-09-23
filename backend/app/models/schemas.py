@@ -39,6 +39,11 @@ class TripRequest(BaseModel):
         # 「IndexError: list index out of range」失败，用户拿到的是无法定位的报错。
         if not self.cities:
             raise ValueError("必须提供 city 或 cities 中的至少一个目的地城市")
+        # 城市名只有空白同样无效：这类输入能通过「列表非空」这一层检查，却会一路
+        # 走到 trip_planner_agent 里生成一份城市为空的行程——与上面要消除的
+        # 「先成功、再失败」属于同一类静默错误。
+        if not any((cs.city or "").strip() for cs in self.cities):
+            raise ValueError("目的地城市名称不能为空")
         return self
 
     class Config:
