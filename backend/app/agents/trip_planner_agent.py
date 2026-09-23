@@ -201,37 +201,16 @@ class MultiAgentTripPlanner:
                 self._init_amap_tools(settings)
 
             # ---------- 构建动态提示词 ----------
-            weather_prompt = _build_weather_agent_prompt(tool_prefix)
-            hotel_prompt = _build_hotel_agent_prompt(tool_prefix)
+            self._weather_prompt = _build_weather_agent_prompt(tool_prefix)
+            self._hotel_prompt = _build_hotel_agent_prompt(tool_prefix)
 
             # 取消高德景点 Agent,改用原生小红书服务
             # print("  - 创建景点搜索Agent...")
 
-            # 创建天气查询Agent
-            print("  - 创建天气查询Agent...")
-            self.weather_agent = SimpleAgent(
-                name="天气查询专家",
-                llm=self.llm,
-                system_prompt=weather_prompt
-            )
-            self.weather_agent.add_tool(self._active_tool)
-
-            # 创建酒店推荐Agent
-            print("  - 创建酒店推荐Agent...")
-            self.hotel_agent = SimpleAgent(
-                name="酒店推荐专家",
-                llm=self.llm,
-                system_prompt=hotel_prompt
-            )
-            self.hotel_agent.add_tool(self._active_tool)
-
-            # 创建行程规划Agent(不需要工具)
-            print("  - 创建行程规划Agent...")
-            self.planner_agent = SimpleAgent(
-                name="行程规划专家",
-                llm=self.llm,
-                system_prompt=PLANNER_AGENT_PROMPT
-            )
+            print("  - 创建天气查询、酒店推荐、行程规划Agent...")
+            # 这里保留一组实例供状态接口读取（如 routes/trip.py 的 agent 信息），
+            # 真正的规划流程会在每次请求中另建全新实例，见 _build_conversation_agents。
+            self.weather_agent, self.hotel_agent, self.planner_agent = self._build_conversation_agents()
 
             print(f"✅ 多智能体系统初始化成功 (供应商={self.map_provider})")
             print(f"   天气查询Agent: {len(self.weather_agent.list_tools())} 个工具")
@@ -242,6 +221,42 @@ class MultiAgentTripPlanner:
             import traceback
             traceback.print_exc()
             raise
+
+    def _build_conversation_agents(self) -> tuple[SimpleAgent, SimpleAgent, SimpleAgent]:
+        """构建一组全新的会话 Agent（天气 / 酒店 / 行程规划）。
+
+        hello_agents 的 ``SimpleAgent.run()`` 会把本次输入与回复追加到
+        ``Agent._history``，并在下一次 ``run()`` 时把整段历史重新注入 messages。
+        因此 Agent 实例不能在多次请求之间复用，否则：
+
+        1. 后一次规划会带上前几次请求的城市、偏好与已生成的行程 JSON，
+           造成跨请求上下文污染（多用户部署时等同于串号）；
+        2. prompt 随请求数线性膨胀，最终触发模型上下文超限，之后所有规划
+           请求都会失败，只能重启进程才能恢复。
+
+        ``SimpleAgent.__init__`` 只做字段赋值，构造成本可忽略；真正昂贵的
+        地图工具仍在 ``__init__`` 中初始化一次，通过 ``self._active_tool`` 复用。
+        """
+        weather_agent = SimpleAgent(
+            name="天气查询专家",
+            llm=self.llm,
+            system_prompt=self._weather_prompt,
+        )
+        weather_agent.add_tool(self._active_tool)
+
+        hotel_agent = SimpleAgent(
+            name="酒店推荐专家",
+            llm=self.llm,
+            system_prompt=self._hotel_prompt,
+        )
+        hotel_agent.add_tool(self._active_tool)
+
+        planner_agent = SimpleAgent(
+            name="行程规划专家",
+            llm=self.llm,
+            system_prompt=PLANNER_AGENT_PROMPT,
+        )
+        return weather_agent, hotel_agent, planner_agent
 
     def _init_amap_tools(self, settings):
         """初始化高德地图 MCP 工具。"""
@@ -452,6 +467,9 @@ class MultiAgentTripPlanner:
             _lang = (getattr(request, 'language', 'zh') or 'zh').strip().lower().split('-')[0]
             _lang_hint = "" if _lang == "zh" else f" Please respond in {'English' if _lang == 'en' else _lang}."
 
+            # 本次请求专用的 Agent 实例：对话历史必须在请求之间隔离
+            weather_agent, hotel_agent, planner_agent = self._build_conversation_agents()
+
             # ========== 按城市逐一搜集信息 ==========
             all_attractions: Dict[str, str] = {}
             all_weather: Dict[str, str] = {}
@@ -485,7 +503,7 @@ class MultiAgentTripPlanner:
                     progress_base + progress_step
                 )
                 weather_query = f"请查询{city}的天气信息{_lang_hint}"
-                weather_response = await asyncio.to_thread(self.weather_agent.run, weather_query)
+                weather_response = await asyncio.to_thread(weather_agent.run, weather_query)
                 print(f"🌤️  {city} 天气查询结果: {weather_response[:150]}...")
 
                 # Google 天气降级
@@ -507,7 +525,7 @@ class MultiAgentTripPlanner:
                     progress_base + progress_step * 2
                 )
                 hotel_query = f"请搜索{city}的{request.accommodation}酒店{_lang_hint}"
-                hotel_response = await asyncio.to_thread(self.hotel_agent.run, hotel_query)
+                hotel_response = await asyncio.to_thread(hotel_agent.run, hotel_query)
                 all_hotels[city] = hotel_response
                 print(f"🏨 {city} 酒店搜索结果: {hotel_response[:150]}...")
 
@@ -536,6 +554,7 @@ class MultiAgentTripPlanner:
                 all_weather,
                 all_hotels,
                 memory_snippet,
+                planner_agent=planner_agent,
             )
             print(f"行程规划结果: {planner_response[:300]}...\n")
 
@@ -584,6 +603,7 @@ class MultiAgentTripPlanner:
         weather: Dict[str, str],
         hotels: Dict[str, str],
         memory_snippet: str = "",
+        planner_agent: Optional[SimpleAgent] = None,
     ) -> str:
         """规划阶段使用更长超时，并在超时后重试一次。
 
@@ -592,13 +612,15 @@ class MultiAgentTripPlanner:
             weather: {city_name: 天气查询结果文本}
             hotels: {city_name: 酒店搜索结果文本}
             memory_snippet: 用户历史偏好文本，注入规划 Prompt
+            planner_agent: 本次请求专用的规划 Agent；缺省时回退到实例属性
         """
         timeout = int(os.getenv("TRIP_PLANNER_TIMEOUT", "180"))
+        planner_agent = planner_agent or self.planner_agent
         planner_query = self._build_planner_query(request, attractions, weather, hotels, memory_snippet)
 
         try:
             return await asyncio.to_thread(
-                self.planner_agent.run,
+                planner_agent.run,
                 planner_query,
                 timeout=timeout,
                 temperature=0.2,
@@ -614,7 +636,7 @@ class MultiAgentTripPlanner:
                 "但必须输出完整合法的 JSON，不要输出解释性文字。"
             )
             return await asyncio.to_thread(
-                self.planner_agent.run,
+                planner_agent.run,
                 planner_query,
                 timeout=timeout,
                 temperature=0.2,
