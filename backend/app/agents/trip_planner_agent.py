@@ -177,6 +177,58 @@ PLANNER_AGENT_PROMPT = """你是行程规划专家。你的任务是根据景点
 """
 
 
+def _strip_json_comments(text: str) -> str:
+    """删除 JSON 字符串字面量之外的 JS 风格注释（// 行注释与 /* */ 块注释）。
+
+    不能直接用 ``re.sub(r'//[^\\n]*', '', ...)``：正则不区分「JSON 字符串内部」
+    与「结构位置」，而合法 JSON 的字符串值里天然含有 ``//``（例如
+    ``https://gugong.ktmtech.cn``）。直接删除会把该行剩余内容连同结尾引号
+    一起吞掉，使整段响应解析失败；在紧凑单行输出下更会被截断修复成
+    "合法但缺数据" 的 JSON，静默丢失行程内容。
+    """
+    result = []
+    index = 0
+    length = len(text)
+    in_string = False
+
+    while index < length:
+        char = text[index]
+
+        if in_string:
+            result.append(char)
+            if char == '\\' and index + 1 < length:
+                # 转义序列整体跳过，避免 \" 被误判为字符串结束
+                result.append(text[index + 1])
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+            index += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            result.append(char)
+            index += 1
+            continue
+
+        if char == '/' and index + 1 < length:
+            next_char = text[index + 1]
+            if next_char == '/':
+                line_end = text.find('\n', index)
+                index = length if line_end == -1 else line_end
+                continue
+            if next_char == '*':
+                block_end = text.find('*/', index + 2)
+                index = length if block_end == -1 else block_end + 2
+                continue
+
+        result.append(char)
+        index += 1
+
+    return ''.join(result)
+
+
 class MultiAgentTripPlanner:
     """多智能体旅行规划系统"""
 
@@ -738,8 +790,8 @@ JSON 的 key 名称保持英文不变，只翻译 value 中的文字。"""
         json_str = _re.sub(r'^```(?:json)?\s*', '', json_str.strip())
         json_str = _re.sub(r'```\s*$', '', json_str.strip())
         # 2. 移除 JS 风格注释 // ... 和 /* ... */
-        json_str = _re.sub(r'//[^\n]*', '', json_str)
-        json_str = _re.sub(r'/\*.*?\*/', '', json_str, flags=_re.DOTALL)
+        #    必须跳过字符串字面量，否则会截断字符串值里的 URL
+        json_str = _strip_json_comments(json_str)
         # 3. 移除 JSON 值中的控制字符
         json_str = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', json_str)
         # 4. 修复尾部逗号: },] 或 },}
