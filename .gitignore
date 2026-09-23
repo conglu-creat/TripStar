@@ -1,7 +1,9 @@
-# ========== 本地配置与密钥（.env.example 是模板，不在此列，需保留） ==========
+# ========== 本地配置与密钥（.env.example 是模板，必须保留） ==========
+# .env.* 覆盖 .env.local / .env.production / .env.development 等
+# （Vite 的模式文件也走这套命名），末尾再显式放行所有 .env.example。
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 backend/runtime_settings.json
 backend/data/trip_tasks
 backend/data/photo_cache
