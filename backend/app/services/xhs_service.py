@@ -619,11 +619,16 @@ async def get_photo_from_xhs(keyword: str) -> str:
 #    生成约 1 分钟后即失效，即使服务端带正确 Referer 再取也会 403。
 # 因此图片必须由后端在拿到直链的瞬间立即代取并落盘；磁盘缓存以搜索
 # 关键词为主键（而非 URL），缓存过期/丢失后可透明地重搜重取。
+#
+# 高德官方图库（store.is.autonavi.com）没有上述两层限制，前端可以直接引用；
+# 这里把它一并放进白名单，是为了**导出**场景——html2canvas 用
+# crossorigin="anonymous" 读取图片，而高德图库不返回 CORS 头，
+# 直链会因跨域被拒，必须经同源代理（由 CORS 中间件补上响应头）。
 
 _IMAGE_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "photo_cache"
 _IMAGE_CACHE_TTL_SECONDS = 24 * 3600
 _IMAGE_MAX_SIZE_BYTES = 10 * 1024 * 1024
-_IMAGE_ALLOWED_HOST_SUFFIXES = (".xiaohongshu.com", ".xhscdn.com")
+_IMAGE_ALLOWED_HOST_SUFFIXES = (".xiaohongshu.com", ".xhscdn.com", ".autonavi.com")
 _IMAGE_FETCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://www.xiaohongshu.com/",
@@ -636,13 +641,13 @@ class XHSImageProxyError(Exception):
 
 
 def _validate_image_url(url: str) -> None:
-    """校验图片 URL 必须指向小红书图片 CDN，防止代理被滥用于任意地址（SSRF）。"""
+    """校验图片 URL 必须指向允许的图床域名（小红书 / 高德），防止代理被滥用于任意地址（SSRF）。"""
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"不支持的图片 URL 协议: {parsed.scheme}")
     host = (parsed.hostname or "").lower()
     if not any(host == suffix.lstrip(".") or host.endswith(suffix) for suffix in _IMAGE_ALLOWED_HOST_SUFFIXES):
-        raise ValueError(f"仅允许代理小红书图片域名，收到: {host}")
+        raise ValueError(f"仅允许代理小红书/高德图片域名，收到: {host}")
 
 
 def _image_cache_paths(cache_key: str) -> tuple:

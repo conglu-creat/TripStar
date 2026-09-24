@@ -16,6 +16,8 @@ services:
       - LLM_TIMEOUT=${LLM_TIMEOUT:-600}
       - VITE_AMAP_WEB_KEY=${VITE_AMAP_WEB_KEY:-your_amap_web_api_key_here}
       - XHS_COOKIE=${XHS_COOKIE:-your_xhs_cookie_here}
+      # 小红书数据源开关（默认关闭）：景点图片默认走高德官方图库
+      - ENABLE_XHS=${ENABLE_XHS:-false}
       - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY:-}
       - GOOGLE_MAPS_PROXY=${GOOGLE_MAPS_PROXY:-}
       - ENABLE_USER_MEMORY=${ENABLE_USER_MEMORY:-false}

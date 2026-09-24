@@ -1,5 +1,8 @@
 """POI相关API路由"""
 
+import asyncio
+from urllib.parse import quote
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -140,38 +143,55 @@ async def proxy_attraction_image(name: Optional[str] = None, url: Optional[str] 
 @router.get(
     "/photo",
     summary="获取景点图片",
-    description="根据景点名称从小红书获取图片"
+    description="优先返回高德官方图库直链；仅当 ENABLE_XHS 开启时才用小红书兜底"
 )
 async def get_attraction_photo(name: str, city: Optional[str] = None):
     """
-    获取景点图片
+    获取景点图片地址。
+
+    返回的 `photo_url` 是**可直接用于 <img src> 的地址**：
+    - 高德：官方图库绝对直链（稳定、不校验 Referer、无时效签名）
+    - 小红书兜底：后端代理的相对路径，由前端拼上 API base
 
     Args:
         name: 景点名称
-        city: 所在城市
+        city: 所在城市（建议传，能显著提高高德搜索的准确度）
 
     Returns:
-        图片URL
+        图片URL 与来源标识
     """
+    from ...config import get_settings
+    from ...services.amap_rest_service import get_poi_photo_url
+
     try:
-        from ...services.xhs_service import get_photo_from_xhs
-        
-        # 为了避免同名的流行歌曲（如许嵩的《断桥残雪》）、小说或人名干扰
-        # 强制带上前缀“景点”，能够绝对限定搜索范围在旅游打卡贴内
-        query_kw = f"{name} 风景"
-        photo_url = await get_photo_from_xhs(query_kw)
+        # httpx.get 是阻塞调用：必须放到线程里，否则会冻结整个事件循环
+        photo_url = await asyncio.to_thread(get_poi_photo_url, name, city or "")
+        source = "amap" if photo_url else ""
+
+        # 小红书只在显式开启时作为兜底；它依赖登录 Cookie 与混淆 JS 签名，
+        # 稳定性不如官方 API，因此默认不参与。
+        if not photo_url and get_settings().enable_xhs:
+            from ...services.xhs_service import get_photo_from_xhs
+
+            # 加“风景”前缀是为了避开同名歌曲、小说、人名等干扰
+            xhs_url = await get_photo_from_xhs(f"{name} 风景")
+            if xhs_url:
+                # 小红书直链带约 1 分钟时效签名，不能直接给前端，
+                # 必须走后端按名字代理（缓存 miss 时会自动重搜重取）
+                photo_url = f"/api/poi/image?name={quote(name)}"
+                source = "xhs"
 
         if not photo_url:
             # 兜底：交由前端展示默认占位图
-            print(f"⚠️ 无法为 {name} 找到对应的小红书景点图片，返回空")
-            photo_url = ""
-            
+            print(f"⚠️ 未找到「{name}」的景点图片 (city={city or '-'})")
+
         return {
             "success": True,
-            "message": "获取图片成功",
+            "message": "获取图片成功" if photo_url else "未找到图片",
             "data": {
                 "name": name,
-                "photo_url": photo_url
+                "photo_url": photo_url,
+                "source": source,
             }
         }
 

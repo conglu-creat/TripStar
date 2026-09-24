@@ -43,6 +43,11 @@ class Settings(BaseSettings):
 
     # 小红书配置
     xhs_cookie: str = ""
+    # 小红书数据源开关（默认关闭）。
+    # 景点数据与图片默认走高德官方 Web 服务；开启后才在「高德取不到」时
+    # 回退到小红书。小红书依赖登录 Cookie 与混淆 JS 签名，稳定性与合规性
+    # 都不如官方 API，因此不作为默认路径。
+    enable_xhs: bool = False
 
     # LLM配置 (从环境变量读取,由HelloAgents管理)
     openai_api_key: str = Field(

@@ -1808,10 +1808,23 @@ const loadAttractionPhotos = async () => {
   if (!tripPlan.value) return
 
   const apiBase = getRuntimeApiBaseUrl()
-  const city = tripPlan.value.city
+  const plan = tripPlan.value
+
+  // 逐日建立「景点名 -> 所在城市」映射。
+  // 多城市行程下如果统一用 plan.city 去搜图，会把 B 城的景点当成 A 城的，
+  // 命中率会明显下降（高德是带 region 限定搜索的）。
+  const nameToCity = new Map<string, string>()
+  plan.days.forEach((day) => {
+    day.attractions.forEach((attraction) => {
+      if (attraction.name && !nameToCity.has(attraction.name)) {
+        nameToCity.set(attraction.name, day.city || plan.city || '')
+      }
+    })
+  })
+
   const uniqueNames = Array.from(
     new Set(
-      tripPlan.value.days.flatMap((day) => day.attractions.map((attraction) => attraction.name))
+      plan.days.flatMap((day) => day.attractions.map((attraction) => attraction.name))
     )
   ).filter((name) => name && !attractionPhotos.value[name])
 
@@ -1827,13 +1840,16 @@ const loadAttractionPhotos = async () => {
       const name = uniqueNames[index]
 
       try {
+        const city = nameToCity.get(name) || plan.city || ''
         const response = await fetch(
           `${apiBase}/api/poi/photo?name=${encodeURIComponent(name)}&city=${encodeURIComponent(city)}`
         )
         const data = await response.json()
-        if (data.success && data.data.photo_url) {
-          // 直链带时效签名会过期，统一改走后端 name 键代理（缓存 miss 时自动重搜重取）
-          attractionPhotos.value[name] = `${apiBase}/api/poi/image?name=${encodeURIComponent(name)}`
+        const raw = data?.data?.photo_url
+        if (data.success && raw) {
+          // 后端保证 photo_url 可直接放进 <img src>：
+          // 高德给官方图库绝对直链；小红书兜底给后端代理的相对路径，这里补上 base。
+          attractionPhotos.value[name] = /^https?:\/\//i.test(raw) ? raw : `${apiBase}${raw}`
         }
       } catch (err) {
         console.error(`获取${name}图片失败:`, err)
@@ -1900,7 +1916,13 @@ const buildExportHTML = (mapDataUrl: string = ''): string => {
   tp.days.forEach((day, index) => {
     let attractionsHTML = ''
     day.attractions.forEach((a, ai) => {
-      const photoUrl = toProxiedPhotoUrl(a.image_url) || attractionPhotos.value[a.name] || ''
+      // 导出必须用同源代理地址：这里的 <img> 带 crossorigin="anonymous"，
+      // 而高德图库不返回 CORS 头，直链会因跨域被浏览器拒绝并污染画布。
+      // 已经是后端代理地址的（小红书兜底那条）就不再重复包装一层。
+      const directPhoto = a.image_url || attractionPhotos.value[a.name] || ''
+      const alreadyProxied =
+        directPhoto.startsWith('/api/') || directPhoto.startsWith(`${getRuntimeApiBaseUrl()}/api/`)
+      const photoUrl = alreadyProxied ? directPhoto : toProxiedPhotoUrl(directPhoto)
       const durationText = t('result.export.durationLine', { duration: a.visit_duration || '—' })
       // 图片自适应：不压缩不裁剪，保持原始比例
       const imgTag = photoUrl
