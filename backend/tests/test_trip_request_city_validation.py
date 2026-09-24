@@ -79,6 +79,33 @@ class TripRequestCityValidationTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             TripRequest(**_payload(city=""))
 
+    def test_blank_city_among_valid_ones_is_rejected(self) -> None:
+        """逐条检查，而不是「全部为空才拒绝」。
+
+        若只判断「是否至少有一个非空」，下面这条请求会被接受，并带着一个空白
+        城市名一路走到 trip_planner_agent，为那一天生成没有城市名的日程。
+        这是模糊测试发现的漏洞（4000 轮随机组合中 1000 例破坏了不变量）。
+        """
+        with self.assertRaises(ValidationError):
+            TripRequest(
+                **_payload(cities=[{"city": "北京", "days": 2}, {"city": "", "days": 1}])
+            )
+
+    def test_blank_leading_city_is_rejected(self) -> None:
+        """cities[0] 为空白时，city 会被填成空白，必须一并拒绝。"""
+        with self.assertRaises(ValidationError):
+            TripRequest(
+                **_payload(cities=[{"city": "  ", "days": 2}, {"city": "上海", "days": 1}])
+            )
+
+    def test_whitespace_only_city_is_normalized_from_cities(self) -> None:
+        """city 只有空白但 cities 有效时，取首个城市作为主城市，而不是保留空白。"""
+        request = TripRequest(
+            **_payload(city="   ", cities=[{"city": "广州", "days": 2}])
+        )
+
+        self.assertEqual(request.city, "广州")
+
     def test_multi_city_request_is_untouched(self) -> None:
         request = TripRequest(
             **_payload(cities=[{"city": "北京", "days": 2}, {"city": "西安", "days": 3}])
