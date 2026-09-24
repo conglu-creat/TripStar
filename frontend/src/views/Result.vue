@@ -68,7 +68,6 @@
                   :item="item"
                   :image-src="getAttractionImage(item.name, index)"
                   :active="activeOverviewCard === index"
-                  @hover="setActiveOverviewCard(index)"
                   @image-error="handleImageError"
                   @select-day="goToDayFromOverview"
                 />
@@ -882,6 +881,8 @@ const initOverviewSwiper = async () => {
     },
     mousewheel: {
       thresholdDelta: 70,
+      // 翻到首/末一张后把滚轮交还给页面；否则鼠标停在概览上时页面再也滚不动
+      releaseOnEdges: true,
     },
     spaceBetween: 30,
     loop: false,
@@ -1346,13 +1347,6 @@ const scrollToSection = ({ key }: { key: string }) => {
 const goToDayFromOverview = (dayArrayIndex: number) => {
   activeDays.value = [dayArrayIndex]
   activeSection.value = 'days'
-}
-
-const setActiveOverviewCard = (index: number) => {
-  activeOverviewCard.value = index
-  if (overviewSwiper && overviewSwiper.activeIndex !== index) {
-    overviewSwiper.slideTo(index)
-  }
 }
 
 // 切换编辑模式
