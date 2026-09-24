@@ -616,6 +616,8 @@ let googleInfoWindows: google.maps.InfoWindow[] = []
 let googleDirectionsRenderers: google.maps.DirectionsRenderer[] = []
 const mapProviderType = ref<'google' | 'amap'>('amap')
 let overviewSwiper: Swiper | null = null
+// 拦截「横向分量占优」的滚轮事件，避免 Swiper 判反翻页方向（见下方 guard 说明）
+let overviewWheelAxisGuard: ((event: WheelEvent) => void) | null = null
 let mapInitGeneration = 0
 
 type OverviewAttractionItem = {
@@ -846,7 +848,39 @@ const overviewAttractions = computed<OverviewAttractionItem[]>(() => {
   return items
 })
 
+const detachOverviewWheelAxisGuard = () => {
+  if (!overviewWheelAxisGuard) return
+  overviewSwiperContainerRef.value?.removeEventListener('wheel', overviewWheelAxisGuard, true)
+  overviewWheelAxisGuard = null
+}
+
+// 只让「以纵向为主」的滚轮事件驱动翻页。
+//
+// Swiper 的 mousewheel 模块在 |deltaX| > |deltaY| 时会改用横向分量来判方向
+// （swiper/modules/mousewheel.mjs：delta = |pixelX| > |pixelY| ? -pixelX : -pixelY）。
+// 带倾斜滚轮的鼠标「向左拨」、触控板斜向滑动都会产生以 deltaX 为主的事件，
+// 而它的方向恰好等价于「上一张」——于是正常向下滚动时会偶发倒退一张，
+// 下一次 deltaY 占优又恢复正常。
+// 在捕获阶段把这批事件拦掉，Swiper 就只会走纵向分支。
+//
+// 不用 mousewheel.forceToAxis：它对水平 swiper 的语义是「忽略纵向滚轮」
+// （forceToAxis 分支里纵向占优时直接 return true），会把滚轮翻页整个废掉。
+const attachOverviewWheelAxisGuard = () => {
+  detachOverviewWheelAxisGuard()
+  const container = overviewSwiperContainerRef.value
+  if (!container) return
+  overviewWheelAxisGuard = (event: WheelEvent) => {
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+      event.stopPropagation()
+    }
+  }
+  // Swiper 的 wheel 监听器挂在 .swiper 上（冒泡阶段），这里挂的是它的父节点：
+  // 捕获阶段先于目标节点的冒泡监听器执行，stopPropagation 即可拦住
+  container.addEventListener('wheel', overviewWheelAxisGuard, true)
+}
+
 const destroyOverviewSwiper = () => {
+  detachOverviewWheelAxisGuard()
   if (overviewSwiper) {
     overviewSwiper.destroy(true, true)
     overviewSwiper = null
@@ -904,6 +938,8 @@ const initOverviewSwiper = async () => {
   const initialIndex = Math.min(1, overviewAttractions.value.length - 1)
   activeOverviewCard.value = initialIndex
   overviewSwiper.slideTo(initialIndex, 0, false)
+
+  attachOverviewWheelAxisGuard()
 }
 
 // 知识图谱相关
