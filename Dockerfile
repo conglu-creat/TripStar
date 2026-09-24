@@ -50,9 +50,11 @@ RUN uv pip install --system --no-cache gunicorn "uvicorn[standard]" -i https://m
 # 预下载 amap-mcp-server（避免首次请求时下载导致超时）
 RUN uvx amap-mcp-server --help || true
 
-# 复制后端代码并安装 Node.js 依赖
+# 复制后端代码并安装 Node.js 依赖（小红书签名引擎需要 crypto-js）
+# 用 npm ci 而非 npm install：按提交进仓库的 package-lock.json 安装，
+# 保证同一个 commit 在任何时间、任何机器上构建出的依赖版本一致。
 COPY backend/ ./backend/
-RUN cd backend && npm install --registry=https://registry.npmmirror.com
+RUN cd backend && npm ci --registry=https://registry.npmmirror.com
 
 # 从阶段一复制前端构建产物
 COPY --from=frontend-builder /build/dist ./frontend/dist
